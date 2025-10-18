@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Chat com Gemini</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='chat.css') }}">
+</head>
+<body>
+  <main class="chat-container">
+    <h1>Chat com Gemini</h1>
+
+    <div id="chatBox" class="chat-box"></div>
+
+    <div class="input-area">
+      <textarea id="msgInput" placeholder="Digite uma mensagem..."></textarea>
+      <button id="sendBtn">Enviar</button>
+      <button id="resetBtn" class="secondary">Nova conversa</button>
+    </div>
+  </main>
+
+  <script>
+    const chatBox = document.getElementById("chatBox");
+    const msgInput = document.getElementById("msgInput");
+    const sendBtn = document.getElementById("sendBtn");
+    const resetBtn = document.getElementById("resetBtn");
+
+    function appendMessage(text, sender) {
+      const div = document.createElement("div");
+      div.className = sender === "user" ? "msg user" : "msg bot";
+      div.innerText = text;
+      chatBox.appendChild(div);
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const text = msgInput.value.trim();
+      if (!text) return;
+      appendMessage(text, "user");
+      msgInput.value = "";
+      sendBtn.disabled = true;
+
+      try {
+        const res = await fetch("/enviar", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text }),
+        });
+        const data = await res.json();
+
+        if (data.reply) {
+          appendMessage(data.reply, "bot");
+        } else {
+          appendMessage("⚠️ " + (data.error || "Erro desconhecido"), "bot");
+        }
+      } catch (err) {
+        appendMessage("❌ Erro de conexão", "bot");
+      } finally {
+        sendBtn.disabled = false;
+      }
+    }
+
+    sendBtn.addEventListener("click", sendMessage);
+    msgInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    resetBtn.addEventListener("click", async () => {
+      await fetch("/reset", { method: "POST" });
+      chatBox.innerHTML = "";
+      appendMessage("🧹 Nova conversa iniciada!", "bot");
+    });
+  </script>
+</body>
+</html>
