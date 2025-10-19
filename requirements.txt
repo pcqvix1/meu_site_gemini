@@ -2,5 +2,4 @@
 Flask
 google-genai
 python-dotenv
-gunicorn
-gevent
+gunicorn[gevent,gthread]
