@@ -1,93 +1,145 @@
+# app.py
 import os
 import logging
-from flask import Flask, render_template, request, Response, jsonify, stream_with_context
+from logging.handlers import RotatingFileHandler
+from flask import Flask, request, jsonify, render_template, session, current_app, Response, stream_with_context
 from dotenv import load_dotenv
-import google.genai as genai
-from google.genai.types import GenerateContentConfig
+from google import genai
+from google.genai.errors import APIError
+from datetime import timedelta
 
-# ==============================
-# CONFIGURAÇÃO GERAL
-# ==============================
+# Carrega variáveis do .env
 load_dotenv()
 
-
 class Config:
+    SECRET_KEY = os.getenv(
+        "FLASK_SECRET_KEY", 
+        "chave_insegura_nao_usar_em_producao_se_estiver_publicado"
+    )   
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-    SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "chave-padrao")
-    MAX_CONTENT_LENGTH = 16 * 1024 * 1024
+    MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    DEBUG = os.getenv("FLASK_DEBUG", "False").lower() in ("1", "true", "yes")
+    PERMANENT_SESSION_LIFETIME = timedelta(hours=2)
+    MAX_TURNS = 12  # quantas mensagens lembrar no histórico
 
 
-def setup_logging():
-    """Configura logging para salvar e exibir no console (Render)."""
-    log_path = os.path.join(os.path.dirname(__file__), "app.log")
-    logging.basicConfig(
-        filename=log_path,
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s"
-    )
+def create_app(config_class=Config):
+    app = Flask(__name__, template_folder="templates", static_folder="static")
+    app.config.from_object(config_class)
+    setup_logging(app)
 
-    # Mostra logs também no painel do Render
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    logging.getLogger().addHandler(console_handler)
+    if not app.config["GEMINI_API_KEY"]:
+        raise RuntimeError("❌ Faltando GEMINI_API_KEY. Verifique as VEs no Render ou o .env local.")
+
+    register_routes(app)
+    return app
 
 
-# ==============================
-# INICIALIZAÇÃO DO APP
-# ==============================
-setup_logging()
-config_class = Config()
-app = Flask(__name__, template_folder="templates", static_folder="static")
-app.config.from_object(config_class)
-app.config["TEMPLATES_AUTO_RELOAD"] = True
+def register_routes(app):
+    @app.route("/")
+    def index():
+        return render_template("chat.html")
 
-# ==============================
-# ROTA PRINCIPAL
-# ==============================
-@app.route("/")
-def index():
-    return render_template("chat.html")
-
-
-# ==============================
-# ROTA DE STREAM (DIGITAÇÃO AO VIVO)
-# ==============================
-@app.route("/stream", methods=["POST"])
-def stream():
-    """Rota que envia o texto em streaming para o front-end."""
-    data = request.get_json()
-    user_input = data.get("prompt", "").strip()
-
-    if not user_input:
-        return jsonify({"error": "Prompt vazio"}), 400
-
-    client = genai.Client(api_key=app.config["GEMINI_API_KEY"])
-    model = app.config["GEMINI_MODEL"]
-
-    def generate():
+    @app.route("/enviar", methods=["POST"])
+    def enviar():
         try:
-            full_text = ""
-            for event in client.models.generate_content_stream(
-                model=model,
-                contents=[user_input],
-                config=GenerateContentConfig(temperature=0.7)
-            ):
-                if event.type == "content_block_delta":
-                    delta = event.delta.text
-                    full_text += delta
-                    yield f"data: {delta}\n\n"
-            yield "data: [FIM]\n\n"
+            # 1. TENTA CRIAR O CLIENTE AQUI
+            try:
+                client = genai.Client(api_key=current_app.config["GEMINI_API_KEY"])
+            except Exception:
+                error_message = (
+                    "❌ Configuração do servidor inválida. Chave da API do Gemini não encontrada."
+                )
+                return Response(error_message, status=500, mimetype='text/plain')
+        
+            data = request.get_json()
+            msg = (data.get("message") or "").strip()
+            if not msg:
+                return jsonify({"error": "Mensagem vazia"}), 400 
+
+            history = session.get("chat_history", [])
+            
+            # Adiciona a mensagem do usuário ao histórico (antes do stream)
+            history.append({"role": "user", "text": msg})
+
+            context = ""
+            for h in history[-current_app.config["MAX_TURNS"]:]:
+                prefix = "Usuário:" if h["role"] == "user" else "Assistente:"
+                context += f"{prefix} {h['text']}\n"
+
+            prompt = (
+                "Você é um assistente gentil e natural, com memória da conversa. "
+                "Continue o diálogo de forma fluida e coerente.\n"
+                f"{context}Assistente:"
+            )
+            
+            @stream_with_context
+            def generate():
+                full_text = ""
+                
+                # Inicia o stream da API do Gemini
+                response_stream = client.models.generate_content_stream(
+                    model=current_app.config["MODEL"], 
+                    contents=prompt
+                )
+                
+                for chunk in response_stream:
+                    text = chunk.text
+                    if text:
+                        yield text 
+                        full_text += text
+                
+                # Atualiza o histórico de sessão com a resposta completa
+                current_history = session.get("chat_history", [])
+                current_history.append({"role": "assistant", "text": full_text})
+                session["chat_history"] = current_history
+                session.modified = True
+
+            # >> RETORNO COM HEADERS ANTI-BUFFERING <<
+            return Response(
+                generate(), 
+                mimetype='text/plain',
+                headers={
+                    'X-Accel-Buffering': 'no',        
+                    'Cache-Control': 'no-cache',      
+                    'Connection': 'keep-alive',       
+                    'Content-Encoding': 'none'        
+                }
+            )
+
+        except APIError as e:
+            current_app.logger.error(f"Erro na API Gemini: {e}")
+            error_message = (
+                "❌ Ocorreu um erro na comunicação com a IA (API). "
+                "Pode ser um problema temporário ou a chave API pode estar incorreta no servidor."
+            )
+            return Response(error_message, status=502, mimetype='text/plain')
+
         except Exception as e:
-            app.logger.error(f"Erro no stream: {str(e)}")
-            yield f"data: [ERRO] {str(e)}\n\n"
+            current_app.logger.exception("Erro interno")
+            error_message = f"❌ Ocorreu um erro interno no servidor: {e.__class__.__name__}. Consulte os logs."
+            return Response(error_message, status=500, mimetype='text/plain')
 
-    return Response(stream_with_context(generate()), content_type="text/event-stream")
+    @app.route("/reset", methods=["POST"])
+    def reset():
+        session.pop("chat_history", None)
+        return jsonify({"ok": True})
 
 
-# ==============================
-# EXECUÇÃO LOCAL
-# ==============================
+def setup_logging(app):
+    log_level = logging.DEBUG if app.config["DEBUG"] else logging.INFO
+    app.logger.setLevel(log_level)
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s"))
+    app.logger.addHandler(console)
+    file_handler = RotatingFileHandler("app.log", maxBytes=5_000_000, backupCount=3)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
+    app.logger.addHandler(file_handler)
+
+
+# CRUCIAL PARA O RENDER/GUNICORN
+app = create_app()
+
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=app.config["DEBUG"])
