@@ -1,5 +1,5 @@
-# ARQUIVO: requirements.txt
-Flask
-google-genai
-python-dotenv
-gunicorn[gevent,gthread]
+Flask==3.0.3
+google-genai>=0.4.0
+python-dotenv>=1.0.1
+gunicorn>=21.2.0
+gevent>=24.2.1
