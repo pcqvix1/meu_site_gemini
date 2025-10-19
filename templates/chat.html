@@ -1,78 +1,218 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="pt-br">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Chat com Gemini</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='chat.css') }}">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Parceiro de Programação Gemini</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa; /* Cor de fundo suave */
+        }
+        .chat-container {
+            height: 90vh;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #dee2e6;
+            border-radius: 1rem;
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            margin-top: 20px;
+        }
+        #messages {
+            flex-grow: 1;
+            padding: 1rem;
+            overflow-y: auto;
+            background-color: #fff;
+        }
+        .message-row {
+            display: flex;
+            margin-bottom: 0.75rem;
+        }
+        .user-message {
+            background-color: #0d6efd; /* Azul do Bootstrap */
+            color: white;
+            padding: 0.75rem 1rem;
+            border-radius: 1.25rem 1.25rem 0.25rem 1.25rem; /* Borda arredondada no topo/esquerda/baixo */
+            max-width: 80%;
+            margin-left: auto;
+        }
+        .assistant-message {
+            background-color: #e9ecef; /* Cinza claro do Bootstrap */
+            color: #212529;
+            padding: 0.75rem 1rem;
+            border-radius: 1.25rem 1.25rem 1.25rem 0.25rem;
+            max-width: 80%;
+            margin-right: auto;
+        }
+        .input-area {
+            padding: 1rem;
+            background-color: #f8f9fa;
+            border-top: 1px solid #dee2e6;
+        }
+        /* Cursor piscando para streaming */
+        .blinking-cursor {
+            font-weight: bold;
+            animation: blink 1s step-start infinite;
+        }
+        @keyframes blink {
+            50% { opacity: 0; }
+        }
+    </style>
 </head>
 <body>
-  <main class="chat-container">
-    <h1>Chat com Gemini</h1>
-
-    <div id="chatBox" class="chat-box"></div>
-
-    <div class="input-area">
-      <textarea id="msgInput" placeholder="Digite uma mensagem..."></textarea>
-      <button id="sendBtn">Enviar</button>
-      <button id="resetBtn" class="secondary">Nova conversa</button>
+    <div class="container">
+        <h1 class="my-4 text-center text-primary">Parceiro de Programação Gemini</h1>
+        <div class="chat-container">
+            <div id="messages">
+                </div>
+            <div class="input-area d-flex">
+                <input type="text" id="user-input" class="form-control rounded-pill me-2" placeholder="Pergunte sobre código, Flask, ou qualquer coisa..." onkeydown="handleKeyDown(event)">
+                <button id="send-button" class="btn btn-success rounded-pill" onclick="sendMessage()">Enviar</button>
+                <button id="reset-button" class="btn btn-danger rounded-pill ms-2" onclick="resetChat()">Novo Chat</button>
+            </div>
+        </div>
     </div>
-  </main>
+    
+    <script>
+        // Variável de controle para evitar cliques duplos durante o streaming
+        let isStreaming = false;
+        let assistantMessageDiv = null;
 
-  <script>
-    const chatBox = document.getElementById("chatBox");
-    const msgInput = document.getElementById("msgInput");
-    const sendBtn = document.getElementById("sendBtn");
-    const resetBtn = document.getElementById("resetBtn");
-
-    function appendMessage(text, sender) {
-      const div = document.createElement("div");
-      div.className = sender === "user" ? "msg user" : "msg bot";
-      div.innerText = text;
-      chatBox.appendChild(div);
-      chatBox.scrollTop = chatBox.scrollHeight;
-    }
-
-    async function sendMessage() {
-      const text = msgInput.value.trim();
-      if (!text) return;
-      appendMessage(text, "user");
-      msgInput.value = "";
-      sendBtn.disabled = true;
-
-      try {
-        const res = await fetch("/enviar", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text }),
-        });
-        const data = await res.json();
-
-        if (data.reply) {
-          appendMessage(data.reply, "bot");
-        } else {
-          appendMessage("⚠️ " + (data.error || "Erro desconhecido"), "bot");
+        function handleKeyDown(event) {
+            if (event.key === 'Enter' && !isStreaming) {
+                sendMessage();
+            }
         }
-      } catch (err) {
-        appendMessage("❌ Erro de conexão", "bot");
-      } finally {
-        sendBtn.disabled = false;
-      }
-    }
 
-    sendBtn.addEventListener("click", sendMessage);
-    msgInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
-      }
-    });
+        function appendMessage(sender, text) {
+            const messages = document.getElementById('messages');
+            
+            // 1. Cria o container row (para alinhar à esquerda ou direita)
+            const row = document.createElement('div');
+            row.classList.add('message-row');
+            
+            // 2. Cria o balão da mensagem
+            const newMessage = document.createElement('div');
+            newMessage.classList.add(sender === 'user' ? 'user-message' : 'assistant-message');
+            newMessage.innerHTML = text; 
 
-    resetBtn.addEventListener("click", async () => {
-      await fetch("/reset", { method: "POST" });
-      chatBox.innerHTML = "";
-      appendMessage("🧹 Nova conversa iniciada!", "bot");
-    });
-  </script>
+            row.appendChild(newMessage);
+            messages.appendChild(row);
+            
+            messages.scrollTop = messages.scrollHeight;
+            return newMessage;
+        }
+
+        function startAssistantMessage() {
+            // Cria a div de resposta do assistente e a adiciona
+            assistantMessageDiv = appendMessage('assistant', '');
+            
+            // Adiciona o cursor piscando, que será removido no final
+            assistantMessageDiv.innerHTML = '<span class="blinking-cursor">|</span>';
+        }
+
+        function stopAssistantMessage() {
+            if (assistantMessageDiv) {
+                // Remove o cursor piscante
+                const cursor = assistantMessageDiv.querySelector('.blinking-cursor');
+                if (cursor) {
+                    cursor.remove();
+                }
+                assistantMessageDiv = null;
+            }
+        }
+
+        // =========================================================
+        // FUNÇÃO DE ENVIO COM STREAMING
+        // =========================================================
+        async function sendMessage() {
+            if (isStreaming) return; // Evita cliques duplos
+            
+            const input = document.getElementById('user-input');
+            const message = input.value.trim();
+            if (!message) return;
+
+            isStreaming = true;
+            input.value = '';
+            
+            // 1. Mostrar a mensagem do usuário imediatamente
+            appendMessage('user', message);
+
+            // 2. Iniciar a área de resposta do assistente
+            startAssistantMessage();
+
+            try {
+                // Requisição FETCH ao invés de XMLHttpRequest para lidar com streaming
+                const response = await fetch('/enviar', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: message })
+                });
+
+                // Se a resposta for um erro HTTP (4xx ou 5xx), leia como texto de erro
+                if (!response.ok) {
+                    const errorText = await response.text(); // Lê o erro como texto puro
+                    stopAssistantMessage();
+                    appendMessage('assistant', `<span class="text-danger">❌ Erro do Servidor (${response.status}):</span> ${errorText.substring(0, 150)}...`);
+                    return;
+                }
+                
+                // 3. Processar o streaming
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                
+                let textContent = '';
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value, { stream: true });
+                    
+                    textContent += chunk;
+                    
+                    // Mostra o texto atualizado, mantendo o cursor piscando
+                    assistantMessageDiv.innerHTML = textContent + '<span class="blinking-cursor">|</span>';
+                    
+                    // Scroll para o fim
+                    document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+                }
+
+            } catch (error) {
+                console.error('Erro na requisição:', error);
+                // Trata falhas de rede
+                appendMessage('assistant', `<span class="text-danger">❌ Erro de Rede:</span> Não foi possível conectar ao servidor.`);
+            } finally {
+                stopAssistantMessage(); // Remove o cursor
+                isStreaming = false;
+            }
+        }
+
+        // Função de reset (Não mudou)
+        function resetChat() {
+            if (isStreaming) return;
+
+            fetch('/reset', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.ok) {
+                        document.getElementById('messages').innerHTML = '';
+                        appendMessage('assistant', 'Chat resetado! Podemos começar uma nova conversa sobre programação.');
+                        document.getElementById('user-input').focus();
+                    }
+                })
+                .catch(error => {
+                    console.error('Erro ao resetar:', error);
+                    alert('Não foi possível resetar o chat. Tente recarregar a página.');
+                });
+        }
+        
+        // Mensagem de boas-vindas inicial
+        document.addEventListener('DOMContentLoaded', () => {
+            appendMessage('assistant', 'Olá! Sou seu parceiro de programação, alimentado pelo Google Gemini. Como posso ajudar no seu código hoje?');
+        });
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

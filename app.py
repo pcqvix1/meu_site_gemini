@@ -2,7 +2,7 @@
 import os
 import logging
 from logging.handlers import RotatingFileHandler
-from flask import Flask, request, jsonify, render_template, session, current_app
+from flask import Flask, request, jsonify, render_template, session, current_app, Response, stream_with_context
 from dotenv import load_dotenv
 from google import genai
 from google.genai.errors import APIError
@@ -29,12 +29,11 @@ def create_app(config_class=Config):
     setup_logging(app)
 
     if not app.config["GEMINI_API_KEY"]:
-        # Se estiver rodando no Render (que usa as variáveis de ambiente) ou localmente
-        # a chave deve ser carregada. Se não estiver, o app não inicia.
         raise RuntimeError("❌ Faltando GEMINI_API_KEY. Verifique as VEs no Render ou o .env local.")
 
-    client = genai.Client(api_key=app.config["GEMINI_API_KEY"])
-    app.extensions["genai_client"] = client
+    # >> REMOVEMOS A CRIAÇÃO DE 'client' AQUI <<
+    # app.extensions["genai_client"] = client # Essa linha foi removida
+
     register_routes(app)
     return app
 
@@ -46,19 +45,32 @@ def register_routes(app):
 
     @app.route("/enviar", methods=["POST"])
     def enviar():
+        # Agora o Flask está rodando, e podemos acessar a configuração de segurança
+        
+        # 1. TENTA CRIAR O CLIENTE AQUI. Se o GEMINI_API_KEY não estiver no env do Render, a
+        #    inicialização do client falhará e será capturada pelo bloco try/except.
+        try:
+            client = genai.Client(api_key=current_app.config["GEMINI_API_KEY"])
+        except Exception:
+             error_message = (
+                "❌ Configuração do servidor inválida. Chave da API do Gemini não encontrada."
+            )
+             return Response(error_message, status=500, mimetype='text/plain')
+        
+        
         try:
             data = request.get_json()
             msg = (data.get("message") or "").strip()
             if not msg:
-                return jsonify({"error": "Mensagem vazia"}), 400
+                return jsonify({"error": "Mensagem vazia"}), 400 
 
-            # Recupera histórico
+            # client já foi criado acima
             history = session.get("chat_history", [])
+            
             history.append({"role": "user", "text": msg})
 
-            # Monta contexto (últimos turnos)
             context = ""
-            for h in history[-app.config["MAX_TURNS"]:]:
+            for h in history[-current_app.config["MAX_TURNS"]:]: # Usando current_app
                 prefix = "Usuário:" if h["role"] == "user" else "Assistente:"
                 context += f"{prefix} {h['text']}\n"
 
@@ -67,33 +79,48 @@ def register_routes(app):
                 "Continue o diálogo de forma fluida e coerente.\n"
                 f"{context}Assistente:"
             )
+            
+            @stream_with_context
+            def generate():
+                full_text = ""
+                
+                # Chamada da API para streaming
+                response_stream = client.models.generate_content_stream(
+                    model=current_app.config["MODEL"], # Usando current_app
+                    contents=prompt
+                )
+                
+                for chunk in response_stream:
+                    text = chunk.text
+                    if text:
+                        yield text 
+                        full_text += text
+                
+                # Após o streaming, atualizamos o histórico na sessão
+                current_history = session.get("chat_history", [])
+                
+                if current_history and current_history[-1]["role"] == "user":
+                    current_history.append({"role": "assistant", "text": full_text})
+                else:
+                    current_history.append({"role": "assistant", "text": full_text})
 
-            client = app.extensions["genai_client"]
-            response = client.models.generate_content(model=app.config["MODEL"], contents=prompt)
+                session["chat_history"] = current_history
+                session.modified = True
 
-            # Extrai texto do Gemini
-            text = None
-            if hasattr(response, "candidates") and response.candidates:
-                parts = response.candidates[0].content.parts
-                if parts and hasattr(parts[0], "text"):
-                    text = parts[0].text
-
-            if not text:
-                text = str(response)
-
-            # Adiciona resposta ao histórico
-            history.append({"role": "assistant", "text": text})
-            session["chat_history"] = history
-            session.modified = True
-
-            return jsonify({"reply": text})
+            return Response(generate(), mimetype='text/plain')
 
         except APIError as e:
-            app.logger.exception("Erro API Gemini")
-            return jsonify({"error": f"Erro na API Gemini: {e}"}), 502
+            current_app.logger.error(f"Erro na API Gemini: {e}")
+            error_message = (
+                "❌ Ocorreu um erro na comunicação com a IA (API). "
+                "Pode ser um problema temporário ou a chave API pode estar incorreta no servidor."
+            )
+            return Response(error_message, status=502, mimetype='text/plain')
+
         except Exception as e:
-            app.logger.exception("Erro interno")
-            return jsonify({"error": f"Erro interno: {e}"}), 500
+            current_app.logger.exception("Erro interno")
+            error_message = f"❌ Ocorreu um erro interno no servidor: {e.__class__.__name__}. Consulte os logs."
+            return Response(error_message, status=500, mimetype='text/plain')
 
     @app.route("/reset", methods=["POST"])
     def reset():
@@ -112,12 +139,8 @@ def setup_logging(app):
     app.logger.addHandler(file_handler)
 
 
-# =========================================================================
-# >> CORREÇÃO CRUCIAL PARA O RENDER/GUNICORN <<
-# O Gunicorn procura uma variável 'app' no nível superior.
-# Esta linha cria essa variável.
+# >> CRUCIAL PARA O RENDER/GUNICORN <<
 app = create_app()
-# =========================================================================
 
 
 if __name__ == "__main__":
