@@ -1,0 +1,10 @@
+# ARQUIVO: .gitignore
+
+# Variáveis de ambiente secretas
+.env
+
+# Logs e Cache
+app.log
+__pycache__/
+.venv/
+venv/
