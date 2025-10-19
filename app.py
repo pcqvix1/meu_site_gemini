@@ -31,9 +31,6 @@ def create_app(config_class=Config):
     if not app.config["GEMINI_API_KEY"]:
         raise RuntimeError("❌ Faltando GEMINI_API_KEY. Verifique as VEs no Render ou o .env local.")
 
-    # >> REMOVEMOS A CRIAÇÃO DE 'client' AQUI <<
-    # app.extensions["genai_client"] = client # Essa linha foi removida
-
     register_routes(app)
     return app
 
@@ -45,32 +42,27 @@ def register_routes(app):
 
     @app.route("/enviar", methods=["POST"])
     def enviar():
-        # Agora o Flask está rodando, e podemos acessar a configuração de segurança
-        
-        # 1. TENTA CRIAR O CLIENTE AQUI. Se o GEMINI_API_KEY não estiver no env do Render, a
-        #    inicialização do client falhará e será capturada pelo bloco try/except.
         try:
-            client = genai.Client(api_key=current_app.config["GEMINI_API_KEY"])
-        except Exception:
-             error_message = (
-                "❌ Configuração do servidor inválida. Chave da API do Gemini não encontrada."
-            )
-             return Response(error_message, status=500, mimetype='text/plain')
+            # TENTA CRIAR O CLIENTE AQUI
+            try:
+                client = genai.Client(api_key=current_app.config["GEMINI_API_KEY"])
+            except Exception:
+                error_message = (
+                    "❌ Configuração do servidor inválida. Chave da API do Gemini não encontrada."
+                )
+                return Response(error_message, status=500, mimetype='text/plain')
         
-        
-        try:
             data = request.get_json()
             msg = (data.get("message") or "").strip()
             if not msg:
                 return jsonify({"error": "Mensagem vazia"}), 400 
 
-            # client já foi criado acima
             history = session.get("chat_history", [])
             
             history.append({"role": "user", "text": msg})
 
             context = ""
-            for h in history[-current_app.config["MAX_TURNS"]:]: # Usando current_app
+            for h in history[-current_app.config["MAX_TURNS"]:]:
                 prefix = "Usuário:" if h["role"] == "user" else "Assistente:"
                 context += f"{prefix} {h['text']}\n"
 
@@ -84,9 +76,8 @@ def register_routes(app):
             def generate():
                 full_text = ""
                 
-                # Chamada da API para streaming
                 response_stream = client.models.generate_content_stream(
-                    model=current_app.config["MODEL"], # Usando current_app
+                    model=current_app.config["MODEL"], 
                     contents=prompt
                 )
                 
@@ -96,7 +87,6 @@ def register_routes(app):
                         yield text 
                         full_text += text
                 
-                # Após o streaming, atualizamos o histórico na sessão
                 current_history = session.get("chat_history", [])
                 
                 if current_history and current_history[-1]["role"] == "user":
@@ -107,7 +97,13 @@ def register_routes(app):
                 session["chat_history"] = current_history
                 session.modified = True
 
-            return Response(generate(), mimetype='text/plain')
+            # >> ALTERAÇÃO CRÍTICA: Adicionando o cabeçalho anti-buffering <<
+            return Response(
+                generate(), 
+                mimetype='text/plain',
+                headers={'X-Accel-Buffering': 'no'}  # Este cabeçalho desativa o buffering em muitos proxies
+            )
+            # << FIM DA ALTERAÇÃO >>
 
         except APIError as e:
             current_app.logger.error(f"Erro na API Gemini: {e}")
