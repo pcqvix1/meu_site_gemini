@@ -97,11 +97,16 @@ def register_routes(app):
                 session["chat_history"] = current_history
                 session.modified = True
 
-            # >> ALTERAÇÃO CRÍTICA: Adicionando o cabeçalho anti-buffering <<
+            # >> ALTERAÇÕES CRÍTICAS: Adicionando múltiplos cabeçalhos anti-buffering <<
             return Response(
                 generate(), 
                 mimetype='text/plain',
-                headers={'X-Accel-Buffering': 'no'}  # Este cabeçalho desativa o buffering em muitos proxies
+                headers={
+                    'X-Accel-Buffering': 'no',        # Para Nginx (Render usa)
+                    'Cache-Control': 'no-cache',      # Garante que não seja armazenado
+                    'Connection': 'keep-alive',       # Tenta manter a conexão aberta
+                    'Content-Encoding': 'none'        # Evita compressão que pode causar buffering
+                }
             )
             # << FIM DA ALTERAÇÃO >>
 
