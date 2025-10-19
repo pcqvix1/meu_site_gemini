@@ -15,7 +15,7 @@ class Config:
     SECRET_KEY = os.getenv(
         "FLASK_SECRET_KEY", 
         "chave_insegura_nao_usar_em_producao_se_estiver_publicado"
-)   
+    )   
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     DEBUG = os.getenv("FLASK_DEBUG", "False").lower() in ("1", "true", "yes")
@@ -29,7 +29,9 @@ def create_app(config_class=Config):
     setup_logging(app)
 
     if not app.config["GEMINI_API_KEY"]:
-        raise RuntimeError("❌ Faltando GEMINI_API_KEY no .env")
+        # Se estiver rodando no Render (que usa as variáveis de ambiente) ou localmente
+        # a chave deve ser carregada. Se não estiver, o app não inicia.
+        raise RuntimeError("❌ Faltando GEMINI_API_KEY. Verifique as VEs no Render ou o .env local.")
 
     client = genai.Client(api_key=app.config["GEMINI_API_KEY"])
     app.extensions["genai_client"] = client
@@ -110,7 +112,13 @@ def setup_logging(app):
     app.logger.addHandler(file_handler)
 
 
-if __name__ == "__main__":
-    app = create_app()
-    app.run(host="127.0.0.1", port=5000, debug=app.config["DEBUG"])
+# =========================================================================
+# >> CORREÇÃO CRUCIAL PARA O RENDER/GUNICORN <<
+# O Gunicorn procura uma variável 'app' no nível superior.
+# Esta linha cria essa variável.
+app = create_app()
+# =========================================================================
 
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=5000, debug=app.config["DEBUG"])
