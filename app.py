@@ -1,4 +1,4 @@
-# app.py
+# app.py (Versão SSE)
 import os
 import logging
 from logging.handlers import RotatingFileHandler
@@ -43,24 +43,22 @@ def register_routes(app):
     @app.route("/enviar", methods=["POST"])
     def enviar():
         try:
-            # 1. TENTA CRIAR O CLIENTE AQUI
+            # 1. Tenta criar o cliente e verifica a mensagem
             try:
                 client = genai.Client(api_key=current_app.config["GEMINI_API_KEY"])
             except Exception:
-                error_message = (
-                    "❌ Configuração do servidor inválida. Chave da API do Gemini não encontrada."
-                )
-                return Response(error_message, status=500, mimetype='text/plain')
+                return jsonify({"error": "Configuração do servidor inválida. Chave da API do Gemini não encontrada."}), 500
         
             data = request.get_json()
             msg = (data.get("message") or "").strip()
             if not msg:
                 return jsonify({"error": "Mensagem vazia"}), 400 
 
+            # 2. Atualiza o histórico do usuário (para contexto)
             history = session.get("chat_history", [])
-            
-            # Adiciona a mensagem do usuário ao histórico (antes do stream)
             history.append({"role": "user", "text": msg})
+            session["chat_history"] = history
+            session.modified = True 
 
             context = ""
             for h in history[-current_app.config["MAX_TURNS"]:]:
@@ -73,52 +71,55 @@ def register_routes(app):
                 f"{context}Assistente:"
             )
             
+            # 3. Função Generator para SSE
             @stream_with_context
-            def generate():
+            def generate_sse():
                 full_text = ""
                 
-                # Inicia o stream da API do Gemini
-                response_stream = client.models.generate_content_stream(
-                    model=current_app.config["MODEL"], 
-                    contents=prompt
-                )
-                
-                for chunk in response_stream:
-                    text = chunk.text
-                    if text:
-                        yield text 
-                        full_text += text
-                
-                # Atualiza o histórico de sessão com a resposta completa
-                current_history = session.get("chat_history", [])
-                current_history.append({"role": "assistant", "text": full_text})
-                session["chat_history"] = current_history
-                session.modified = True
+                try:
+                    response_stream = client.models.generate_content_stream(
+                        model=current_app.config["MODEL"], 
+                        contents=prompt
+                    )
+                    
+                    for chunk in response_stream:
+                        text = chunk.text
+                        if text:
+                            # FORMATO SSE: 'data: [texto]\n\n'
+                            # Adiciona um espaço extra na frente do texto para evitar erros de parsing
+                            yield f"data: {text}\n\n" 
+                            full_text += text
+                    
+                    # 4. Finalização: Envia um evento 'end' e atualiza o histórico com a resposta completa
+                    yield "event: end\ndata: \n\n"
+                    
+                    # Atualiza o histórico na sessão (backend)
+                    current_history = session.get("chat_history", [])
+                    current_history.append({"role": "assistant", "text": full_text})
+                    session["chat_history"] = current_history
+                    session.modified = True
+                    
+                except APIError as e:
+                    current_app.logger.error(f"Erro na API Gemini durante stream: {e}")
+                    error_message = "❌ Erro na comunicação com a IA."
+                    yield f"event: error\ndata: {error_message}\n\n"
+                    yield "event: end\ndata: \n\n" # Finaliza o stream
 
-            # >> RETORNO COM HEADERS ANTI-BUFFERING <<
+            # 5. Retorna a Resposta com mimetype SSE
             return Response(
-                generate(), 
-                mimetype='text/plain',
+                generate_sse(), 
+                mimetype='text/event-stream',
                 headers={
-                    'X-Accel-Buffering': 'no',        
-                    'Cache-Control': 'no-cache',      
-                    'Connection': 'keep-alive',       
-                    'Content-Encoding': 'none'        
+                    'X-Accel-Buffering': 'no',
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                    'Content-Encoding': 'none'
                 }
             )
 
-        except APIError as e:
-            current_app.logger.error(f"Erro na API Gemini: {e}")
-            error_message = (
-                "❌ Ocorreu um erro na comunicação com a IA (API). "
-                "Pode ser um problema temporário ou a chave API pode estar incorreta no servidor."
-            )
-            return Response(error_message, status=502, mimetype='text/plain')
-
         except Exception as e:
             current_app.logger.exception("Erro interno")
-            error_message = f"❌ Ocorreu um erro interno no servidor: {e.__class__.__name__}. Consulte os logs."
-            return Response(error_message, status=500, mimetype='text/plain')
+            return jsonify({"error": f"Erro interno: {e.__class__.__name__}. Consulte os logs."}), 500
 
     @app.route("/reset", methods=["POST"])
     def reset():

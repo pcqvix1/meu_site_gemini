@@ -7,7 +7,7 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body {
-            background-color: #f8f9fa;
+            background-color: #f8f9fa; 
         }
         .chat-container {
             height: 90vh;
@@ -33,13 +33,13 @@
             background-color: #0d6efd; 
             color: white;
             padding: 0.75rem 1rem;
-            border-radius: 1.25rem 1.25rem 0.25rem 1.25rem;
+            border-radius: 1.25rem 1.25rem 0.25rem 1.25rem; 
             max-width: 80%;
             margin-left: auto;
             word-wrap: break-word;
         }
         .assistant-message {
-            background-color: #e9ecef;
+            background-color: #e9ecef; 
             color: #212529;
             padding: 0.75rem 1rem;
             border-radius: 1.25rem 1.25rem 1.25rem 0.25rem;
@@ -77,7 +77,6 @@
     </div>
     
     <script>
-        // Variável de controle para evitar cliques duplos durante o streaming
         let isStreaming = false;
         let assistantMessageDiv = null;
 
@@ -120,9 +119,11 @@
             isStreaming = false;
         }
 
-        // FUNÇÃO DE ENVIO COM STREAMING (FETCH + READER)
+        // =========================================================
+        // >> FUNÇÃO DE ENVIO COM LEITURA SSE <<
+        // =========================================================
         async function sendMessage() {
-            if (isStreaming) return;
+            if (isStreaming) return; 
             
             const input = document.getElementById('user-input');
             const message = input.value.trim();
@@ -135,49 +136,80 @@
             startAssistantMessage();
 
             try {
-                // ROTA CORRETA: /enviar
-                const response = await fetch('/enviar', { 
+                // 1. Envia a mensagem do usuário via POST
+                const response = await fetch('/enviar', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: message })
                 });
 
                 if (!response.ok) {
-                    const errorText = await response.text(); 
                     stopAssistantMessage();
-                    const displayError = errorText.substring(0, 150).replace(/\n/g, ' ') + (errorText.length > 150 ? '...' : '');
-                    appendMessage('assistant', `<span class="text-danger">❌ Erro do Servidor (${response.status}):</span> ${displayError}`);
+                    const errorData = await response.text();
+                    appendMessage('assistant', `<span class="text-danger">❌ Erro do Servidor (${response.status}):</span> ${errorData.substring(0, 150)}`);
                     return;
                 }
-                
-                // Processar o streaming
+
+                // 2. Iniciar a leitura do Stream e PARSEAR o formato SSE
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
-                
                 let textContent = '';
-                
+                let buffer = '';
+
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
 
                     const chunk = decoder.decode(value, { stream: true });
+                    buffer += chunk;
                     
-                    textContent += chunk;
-                    
-                    assistantMessageDiv.innerHTML = textContent + '<span class="blinking-cursor">|</span>';
-                    
-                    document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
-                }
+                    // Processa o buffer para extrair eventos SSE (delimitados por \n\n)
+                    let lines = buffer.split('\n\n');
+                    buffer = lines.pop(); // Mantém a última linha incompleta
 
+                    for (const lineGroup of lines) {
+                        const linesArray = lineGroup.split('\n');
+                        let data = '';
+                        let event = 'message';
+
+                        for (const line of linesArray) {
+                            if (line.startsWith('data: ')) {
+                                // O SSE ignora o primeiro espaço APÓS 'data: '
+                                data += line.substring(6); 
+                            } else if (line.startsWith('event: ')) {
+                                event = line.substring(7).trim(); 
+                            }
+                        }
+
+                        if (event === 'end') {
+                            stopAssistantMessage();
+                            return; 
+                        }
+
+                        if (event === 'error') {
+                            stopAssistantMessage();
+                            appendMessage('assistant', `<span class="text-danger">❌ Erro da IA:</span> ${data}`);
+                            return;
+                        }
+
+                        if (event === 'message' && data) {
+                            textContent += data;
+                            // Mostra o texto atualizado, mantendo o cursor piscando
+                            assistantMessageDiv.innerHTML = textContent + '<span class="blinking-cursor">|</span>';
+                            document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+                        }
+                    }
+                }
             } catch (error) {
-                console.error('Erro na requisição:', error);
+                console.error('Erro na requisição SSE/Chunked:', error);
                 stopAssistantMessage();
-                appendMessage('assistant', `<span class="text-danger">❌ Erro de Rede:</span> Não foi possível conectar ao servidor.`);
+                appendMessage('assistant', `<span class="text-danger">❌ Erro de Rede ou Processamento:</span> Não foi possível processar o stream.`);
             } finally {
-                stopAssistantMessage();
+                stopAssistantMessage(); 
             }
         }
 
+        // Função de reset (Não mudou)
         function resetChat() {
             if (isStreaming) return;
 
